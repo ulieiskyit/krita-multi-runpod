@@ -1,0 +1,46 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+venv
+.venv
+ENV/
+env/
+
+# IDE / editor settings
+.vscode/
+.idea/
+*.code-workspace
+
+# Environment files
+.env
+*.env.local
+
+# Logs and local data
+*.log
+logs/
+*.sqlite3
+
+# Model/data folders
+models/
+_models/
+outputs/
+
+# Docker build cache
+**/.pytest_cache/
+**/.mypy_cache/
+
+# Node/npm artifacts (if any UI workspaces)
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db

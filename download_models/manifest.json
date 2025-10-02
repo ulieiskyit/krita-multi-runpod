@@ -1,0 +1,58 @@
+{
+  "checkpoints": [
+    {
+      "url": "https://civitai.com/api/download/models/128078?type=Model&format=SafeTensor&size=pruned&fp=fp16",
+      "filename": "SD_XL.safetensors"
+    }
+  ],
+  "vae": [
+    {
+      "url": "https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors?download=true",
+      "filename": "sdxl_vae.safetensors"
+    }
+  ],
+  "clip_vision": [
+    {
+      "url": "https://huggingface.co/h94/IP-Adapter/resolve/main/models/image_encoder/model.safetensors",
+      "filename": "clip-vision_vit-h.safetensors"
+    }
+  ],
+  "upscale_models": [
+    {
+      "url": "https://huggingface.co/gemasai/4x_NMKD-Superscale-SP_178000_G/resolve/main/4x_NMKD-Superscale-SP_178000_G.pth",
+      "filename": "4x-NMKD-Superscale-SP-178000-G.pth"
+    },
+    {
+      "url": "https://huggingface.co/Acly/Omni-SR/resolve/main/OmniSR_X2_DIV2K.safetensors",
+      "filename": "OmniSR_X2_DIV2K.safetensors"
+    },
+    {
+      "url": "https://huggingface.co/Acly/Omni-SR/resolve/main/OmniSR_X3_DIV2K.safetensors",
+      "filename": "OmniSR_X3_DIV2K.safetensors"
+    },
+    {
+      "url": "https://huggingface.co/Acly/Omni-SR/resolve/main/OmniSR_X4_DIV2K.safetensors",
+      "filename": "OmniSR_X4_DIV2K.safetensors"
+    }
+  ],
+  "ipadapter": [
+    {
+      "url": "https://huggingface.co/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter_sdxl_vit-h.safetensors",
+      "filename": "ip-adapter_sdxl_vit-h.safetensors"
+    }
+  ],
+  "inpaint": [
+    {
+      "url": "https://huggingface.co/lllyasviel/fooocus_inpaint/resolve/main/fooocus_inpaint_head.pth",
+      "filename": "fooocus_inpaint_head.pth"
+    },
+    {
+      "url": "https://huggingface.co/lllyasviel/fooocus_inpaint/resolve/main/inpaint_v26.fooocus.patch",
+      "filename": "inpaint_v26.fooocus.patch"
+    },
+    {
+      "url": "https://huggingface.co/Acly/MAT/resolve/main/MAT_Places512_G_fp16.safetensors",
+      "filename": "MAT_Places512_G_fp16.safetensors"
+    }
+  ]
+}
