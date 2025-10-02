@@ -8,11 +8,11 @@ A FastAPI gateway that fronts one or more ComfyUI instances. Locally you can poi
 - Optional: RunPod account and API key if you want automatic pod provisioning
 
 ## Repository Layout
-- `main.py` – loads environment/config and boots the FastAPI application
-- `gateway.py` – HTTP/WebSocket proxy and request-routing logic
-- `runpod_manager.py` – RunPod session lifecycle management
-- `download_models.py` – helper script to fetch model assets defined in `manifest.json`
+- `src/main.py` – loads environment/config and boots the FastAPI application
+- `src/gateway.py` – HTTP/WebSocket proxy and request-routing logic
+- `src/runpod_manager.py` – RunPod session lifecycle management
 - `docker/` – image and startup bits used when building a RunPod ComfyUI template
+- `download_models/` – helper utilities to fetch model assets defined in `manifest.json`
 
 ## 1. Prepare the fallback ComfyUI instance
 The gateway always has a fallback upstream known as the "duty" pod. For local development you can run ComfyUI in another terminal (for example via `python main.py --listen 0.0.0.0 --port 3000` inside a ComfyUI checkout) and make sure it is reachable at the URL you configure in `.env`.
@@ -26,25 +26,29 @@ python download_models.py --base-dir models
 Point your ComfyUI instance at the resulting `models/` folder (see `docker/extra_model_paths.yaml` for the layout that the provided Docker image expects).
 
 ## 2. Install Python dependencies
-Create a virtual environment and install the requirements:
+Clone the repository, then create a virtual environment and install the requirements from the project root:
 
 ```
 python -m venv .venv
-.\.venv\Scripts\activate
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+# macOS / Linux
+# source .venv/bin/activate
+
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-(Use `source .venv/bin/activate` instead if you are on WSL/Linux/macOS.)
+When the venv is active the gateway code will be available as the `src` package.
 
 ## 3. Configure environment variables
-Copy `.env` (or create a new one) and adjust the values that matter for your setup:
+Copy `.env.example` to `.env` and adjust the values that matter for your setup. Every variable is documented inline, for example:
 
 - `DUTY_POD_URL` – base URL of the always-on ComfyUI instance you want to forward to locally
 - `USER_ID_HEADER` / `USER_ID_QUERY_KEY` – how clients identify themselves; set `REQUIRE_USER_ID=0` to allow anonymous access without spawning private pods
 - `RUNPOD_API_KEY` – leave blank to disable RunPod provisioning, or supply your actual key
 - `RUNPOD_CONFIG_PATH` – JSON file describing pod template, proxy pattern, GPU sizing, etc. (`runpod.config.json` is provided as a starting point)
-- `RUNPOD_POD_NAME_TAG` – prefix tag that gets prepended to every pod name so the gateway only manages pods it created (default `comfy-gw`)
+- `RUNPOD_POD_NAME_TAG` – prefix tag that gets prepended to every pod name so the gateway only manages pods it created
 - `RUNPOD_PROMPT_THRESHOLD_COUNT` / `RUNPOD_PROMPT_THRESHOLD_WINDOW_S` – how many prompts a user must submit within a rolling window before a dedicated RunPod pod is provisioned (defaults: 5 prompts in 60s)
 - `RUNPOD_TELEMETRY_TEMPLATE` / `RUNPOD_TELEMETRY_PORT` – where the gateway should poll the pod telemetry agent (defaults assume RunPod proxies port 8000)
 - `RUNPOD_TELEMETRY_IDLE_S` – how long the GPU can sit at 0% utilisation before the gateway shuts the pod down (default 600s)
@@ -52,10 +56,10 @@ Copy `.env` (or create a new one) and adjust the values that matter for your set
 Environment variables override values inside `runpod.config.json`, so you can tweak things like GPU type or idle timeout without editing the file.
 
 ## 4. Run the gateway locally
-With the virtual environment activated and `.env` in place:
+With the virtual environment activated and `.env` in place, start Uvicorn from the project root so Python finds the `src` package:
 
 ```
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 Visit `http://localhost:8000/` to confirm the gateway is up. HTTP requests (and WebSocket connections to `/ws`) will be proxied to the fallback ComfyUI until a dedicated RunPod session is ready for the requesting user.
@@ -91,8 +95,8 @@ python docker/telemetry_agent.py
 Set `AUTH_TOKEN` if you want to protect those endpoints while testing.
 
 ## Troubleshooting
-- Gateway fails to start: verify `.env` contains a valid `DUTY_POD_URL` and the file is being loaded (it uses `python-dotenv`).
+- Gateway fails to start: run from the project root and use `uvicorn src.main:app …`; verify `.env` contains a valid `DUTY_POD_URL` and the file is being loaded (it uses `python-dotenv`).
 - Requests return 400 about missing user ID: either send the header configured by `USER_ID_HEADER` or set `REQUIRE_USER_ID=0` in `.env` for local experiments.
 - RunPod pods never become ready: check your template’s `proxy_template`, `health_path`, and GPU availability; logs appear in the gateway process (look for `RunPod session` messages).
 
-That’s it—once both the gateway and ComfyUI are running locally, you can point clients at `http://localhost:8000/` and let the gateway handle routing, health checks, and (if enabled) RunPod session orchestration.
+Once both the gateway and ComfyUI are running locally, clients can talk to `http://localhost:8000/` and the gateway handles routing, health checks, and (if enabled) RunPod session orchestration.
