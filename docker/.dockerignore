@@ -1,0 +1,9 @@
+models/
+output/
+ComfyUI/models
+ComfyUI/output
+**/__pycache__/
+**/.cache/
+.git/
+.vscode/
+venv/

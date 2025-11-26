@@ -16,6 +16,7 @@ from src.runpod_manager import RunpodClient, RunpodSessionManager
 load_dotenv(override=False)
 
 logger = logging.getLogger("comfy.main")
+logging.getLogger("comfy").setLevel(logging.DEBUG)
 
 
 def _env_bool(value: Optional[str], default: bool = True) -> bool:

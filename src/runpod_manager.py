@@ -35,6 +35,7 @@ class RunpodSession:
     tagged: bool = False
     provision_task: Optional[asyncio.Task] = field(default=None, repr=False, compare=False)
     telemetry_task: Optional[asyncio.Task] = field(default=None, repr=False, compare=False)
+    last_prompt_payload: Optional[Dict[str, Any]] = None
     prompt_history: Deque[float] = field(default_factory=deque, repr=False, compare=False)
 
 
@@ -256,7 +257,7 @@ class RunpodSessionManager:
 
         task.add_done_callback(_done)
 
-    async def register_prompt(self, user_id: str) -> None:
+    async def register_prompt(self, user_id: str, payload: Optional[Dict[str, Any]] = None) -> None:
         if self.prompt_threshold_count == 0:
             # threshold disabled -> provision immediately
             await self._trigger_provision(user_id)
@@ -271,10 +272,16 @@ class RunpodSessionManager:
                 session = RunpodSession(user_id=user_id, created_at=now, last_activity=now, last_state_change=now)
                 self._sessions[user_id] = session
             if session.state == "ready":
+                if payload:
+                    session.last_prompt_payload = payload
                 return
             if session.provision_task and not session.provision_task.done():
+                if payload:
+                    session.last_prompt_payload = payload
                 return
             session.last_activity = now
+            if payload:
+                session.last_prompt_payload = payload
             self._record_prompt(session, now)
             prompt_count = len(session.prompt_history)
             if self._should_start_provision(session):
@@ -476,6 +483,7 @@ class RunpodSessionManager:
             await self._wait_for_pod_ready(session)
             session.base_url = self._format_proxy_url(pod_id)
             await self._wait_for_http_ready(session)
+            await self._warmup_pod(session)
             await self._wait_for_telemetry_ready(session)
             session.state = "ready"
             session.ready_at = time.time()
@@ -532,6 +540,72 @@ class RunpodSessionManager:
             return None
         port = self.telemetry_port if self.telemetry_port is not None else self.proxy_port
         return self.telemetry_template.format(pod_id=pod_id, port=port).rstrip("/")
+
+    async def _warmup_pod(self, session: RunpodSession) -> None:
+        """Warm up the pod by sending the last prompt and waiting for queue to empty."""
+        if not session.last_prompt_payload:
+            logger.debug("No prompt payload to warm up pod for %s", session.user_id)
+            return
+        
+        if not session.base_url:
+            logger.warning("Cannot warm up pod for %s: no base_url", session.user_id)
+            return
+        
+        logger.info("Warming up pod for %s with last prompt", session.user_id)
+        
+        # Send the prompt to the new pod
+        prompt_url = f"{session.base_url}/prompt"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    prompt_url,
+                    json=session.last_prompt_payload,
+                    headers={"Content-Type": "application/json"}
+                )
+                if resp.status_code != 200:
+                    logger.warning(
+                        "Warmup prompt failed for %s: %s %s",
+                        session.user_id,
+                        resp.status_code,
+                        resp.text[:200] if resp.text else ""
+                    )
+                    return
+                logger.debug("Warmup prompt sent successfully for %s", session.user_id)
+        except Exception as exc:
+            logger.warning("Failed to send warmup prompt for %s: %s", session.user_id, exc)
+            return
+        
+        # Poll the queue until it's empty
+        queue_url = f"{session.base_url}/queue"
+        deadline = time.time() + self.startup_timeout
+        while True:
+            if time.time() > deadline:
+                logger.warning("Warmup polling timed out for %s", session.user_id)
+                return
+            
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(queue_url)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        exec_info = data.get("queue_running", [])
+                        queue_pending = data.get("queue_pending", [])
+                        
+                        # Check if queue is empty
+                        if len(exec_info) == 0 and len(queue_pending) == 0:
+                            logger.info("Warmup completed for %s, queue is empty", session.user_id)
+                            return
+                        
+                        logger.debug(
+                            "Warmup in progress for %s: running=%d, pending=%d",
+                            session.user_id,
+                            len(exec_info),
+                            len(queue_pending)
+                        )
+            except Exception as exc:
+                logger.debug("Queue polling failed during warmup for %s: %s", session.user_id, exc)
+            
+            await asyncio.sleep(2.0)
 
     async def _wait_for_telemetry_ready(self, session: RunpodSession) -> None:
         if not self._telemetry_client or not self.telemetry_template or not session.pod_id:

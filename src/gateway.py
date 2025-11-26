@@ -20,6 +20,47 @@ from src.runpod_manager import RunpodSessionManager, UpstreamTarget
 
 logger = logging.getLogger("comfy.gateway")
 
+
+class PromptQueueState:
+    """Serializes prompt submissions per user and releases once execution ends."""
+
+    def __init__(self) -> None:
+        self._gate = asyncio.Lock()
+        self._state_lock = asyncio.Lock()
+        self._active_prompt_id: Optional[str] = None
+
+    async def wait_turn(self) -> None:
+        await self._gate.acquire()
+
+    async def prompt_started(self, prompt_id: Optional[str]) -> None:
+        async with self._state_lock:
+            self._active_prompt_id = prompt_id
+        if prompt_id is None:
+            self._release_if_locked()
+
+    async def prompt_finished(self, prompt_id: Optional[str]) -> None:
+        async with self._state_lock:
+            if self._active_prompt_id and prompt_id and prompt_id != self._active_prompt_id:
+                return
+            self._active_prompt_id = None
+        self._release_if_locked()
+
+    async def prompt_failed(self) -> None:
+        async with self._state_lock:
+            self._active_prompt_id = None
+        self._release_if_locked()
+
+    async def is_active(self, prompt_id: Optional[str] = None) -> bool:
+        async with self._state_lock:
+            if prompt_id is None:
+                return self._active_prompt_id is not None
+            return self._active_prompt_id == prompt_id
+
+    def _release_if_locked(self) -> None:
+        if self._gate.locked():
+            self._gate.release()
+
+
 HOP_BY_HOP = {
     "connection",
     "keep-alive",
@@ -72,6 +113,8 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
     runpod_enabled = session_manager is not None
     app.state.session_manager = session_manager
     app.state.config = config
+    app.state.prompt_queues: Dict[str, PromptQueueState] = {}
+    app.state.ip_to_user: Dict[str, str] = {}
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -100,6 +143,12 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
                     val = request.query_params.get(key)
                     if val:
                         return val.strip()
+        
+        if request.client and request.client.host:
+            mapped = app.state.ip_to_user.get(request.client.host)
+            if mapped:
+                return mapped
+
         if config.use_client_ip and request.client:
             host = getattr(request.client, "host", None)
             if host:
@@ -127,6 +176,15 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
             if host:
                 return host
         return None
+
+    def _get_prompt_queue(user_id: Optional[str]) -> PromptQueueState:
+        key = user_id.strip() if user_id else "__anon__"
+        queues: Dict[str, PromptQueueState] = app.state.prompt_queues
+        queue = queues.get(key)
+        if queue is None:
+            queue = PromptQueueState()
+            queues[key] = queue
+        return queue
 
     def _is_prompt_request(path: str, request: Request) -> bool:
         if request.method != "POST":
@@ -159,8 +217,18 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
             client_id = _extract_client_id_from_body(body)
             if client_id:
                 user_id = client_id
+        
+        if user_id and request.client and request.client.host:
+            if user_id != request.client.host:
+                app.state.ip_to_user[request.client.host] = user_id
+
         if not user_id:
             if config.require_user_id:
+                logger.warning(
+                    "Rejecting %s %s: missing user identifier",
+                    request.method,
+                    request.url.path,
+                )
                 raise HTTPException(
                     status_code=400,
                     detail=(
@@ -168,11 +236,30 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
                         f"{config.user_id_header} or query parameter {config.user_id_query_key}."
                     ),
                 )
+            logger.info(
+                "Routing %s %s to duty pod (missing user id)",
+                request.method,
+                request.url.path,
+            )
             return UpstreamTarget(url=duty_url, session_ready=False, via_duty=True)
         if not runpod_enabled:
+            logger.debug(
+                "RunPod disabled; routing %s %s to duty pod for user %s",
+                request.method,
+                request.url.path,
+                user_id,
+            )
             return UpstreamTarget(url=duty_url, session_ready=False, via_duty=True, user_id=user_id)
         assert session_manager is not None
-        return await session_manager.resolve(user_id)
+        target = await session_manager.resolve(user_id)
+        logger.debug(
+            "Routing %s %s to %s pod for user %s",
+            request.method,
+            request.url.path,
+            "duty" if target.via_duty else "private",
+            user_id,
+        )
+        return target
 
     def _attach_gateway_headers(response: Response, target: UpstreamTarget) -> Response:
         if not isinstance(response, Response):
@@ -214,7 +301,12 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
                 elif "text/" in content_type or content_type == "":
                     response = PlainTextResponse(status_code=r.status_code, content=r.text, headers=hdrs)
                 else:
-                    response = StreamingResponse(r.aiter_raw(), status_code=r.status_code, headers=hdrs)
+                    response = Response(
+                        content=r.content,
+                        status_code=r.status_code,
+                        headers=hdrs,
+                        media_type=content_type or None,
+                    )
                 return _attach_gateway_headers(response, target)
         except Exception:
             pass
@@ -334,6 +426,8 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
                 user_id=user_id,
             )
 
+        queue_state = _get_prompt_queue(user_id) if user_id or not config.require_user_id else None
+
         subprotocols = ws.scope.get("subprotocols") or None
 
         async def _resolve_target() -> UpstreamTarget:
@@ -394,6 +488,36 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
                 if user_id and session_manager:
                     await session_manager.bump_activity(user_id)
 
+        async def _handle_upstream_message(payload: str) -> None:
+            if not queue_state:
+                return
+            try:
+                data = json.loads(payload)
+            except (TypeError, json.JSONDecodeError):
+                return
+            if not isinstance(data, dict):
+                return
+            msg_type = data.get("type")
+            if msg_type in {"execution_end", "execution_success", "execution_error", "execution_interrupted"}:
+                prompt_data = data.get("data") or {}
+                prompt_id = prompt_data.get("prompt_id")
+                if isinstance(prompt_id, str) and prompt_id:
+                    await queue_state.prompt_finished(prompt_id)
+                else:
+                    await queue_state.prompt_finished(None)
+                return
+            if msg_type == "status":
+                status = (data.get("data") or {}).get("status") or {}
+                exec_info = status.get("exec_info") or {}
+                queue_pending = exec_info.get("queue_pending")
+                queue_remaining = exec_info.get("queue_remaining")
+                queue_running = exec_info.get("queue_running")
+                if all(
+                    val in {0, None}
+                    for val in (queue_pending, queue_remaining, queue_running)
+                ):
+                    await queue_state.prompt_finished(None)
+
         async def _pump_upstream(upstream):
             while True:
                 msg = await upstream.recv()
@@ -401,6 +525,7 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
                     await ws.send_bytes(msg)
                 else:
                     await ws.send_text(msg)
+                    await _handle_upstream_message(msg)
                 if user_id and session_manager:
                     await session_manager.bump_activity(user_id)
 
@@ -523,42 +648,170 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
     async def proxy_all(path: str, request: Request):
         body = await request.body()
         target = await _resolve_for_request(request, body)
-        base = target.url
-        qs = request.url.query
-        upstream_url = f"{base}/{path}" + (f"?{qs}" if qs else "")
         headers = _filter_headers(request.headers)
+        is_prompt = _is_prompt_request(path, request)
 
-        if request.method == "OPTIONS":
-            response = Response(status_code=204)
-            return _attach_gateway_headers(response, target)
+        async def _forward(
+            current_target: UpstreamTarget,
+            queue_state: Optional[PromptQueueState],
+        ) -> tuple[Response, Optional[str]]:
+            base = current_target.url
+            qs = request.url.query
+            upstream_url = f"{base}/{path}" + (f"?{qs}" if qs else "")
 
-        async with httpx.AsyncClient(timeout=None) as cli:
-            r = await cli.request(
-                request.method,
-                upstream_url,
-                content=body if request.method in {"POST", "PUT", "PATCH"} else None,
-                headers=headers,
-            )
+            if request.method == "OPTIONS":
+                response = Response(status_code=204)
+                response = _attach_gateway_headers(response, current_target)
+                if queue_state:
+                    await queue_state.prompt_started(None)
+                return response, None
 
-        content_type = r.headers.get("content-type", "")
-        hdrs = _filter_headers(r.headers)
+            try:
+                async with httpx.AsyncClient(timeout=None) as cli:
+                    r = await cli.request(
+                        request.method,
+                        upstream_url,
+                        content=body if request.method in {"POST", "PUT", "PATCH"} else None,
+                        headers=headers,
+                    )
+            except Exception:
+                if queue_state:
+                    await queue_state.prompt_failed()
+                raise
 
-        if "application/json" in content_type:
-            response = JSONResponse(status_code=r.status_code, content=r.json(), headers=hdrs)
-        elif "text/" in content_type or content_type == "":
-            response = PlainTextResponse(status_code=r.status_code, content=r.text, headers=hdrs)
+            content_type = r.headers.get("content-type", "")
+            hdrs = _filter_headers(r.headers)
+
+            json_payload: Optional[Dict[str, object]] = None
+            if "application/json" in content_type:
+                try:
+                    json_payload = r.json()
+                except json.JSONDecodeError:
+                    json_payload = None
+
+            if json_payload is not None:
+                response = JSONResponse(status_code=r.status_code, content=json_payload, headers=hdrs)
+            elif "text/" in content_type or content_type == "":
+                response = PlainTextResponse(status_code=r.status_code, content=r.text, headers=hdrs)
+            else:
+                response = Response(
+                    content=r.content,
+                    status_code=r.status_code,
+                    headers=hdrs,
+                    media_type=content_type or None,
+                )
+
+            response = _attach_gateway_headers(response, current_target)
+
+            prompt_id: Optional[str] = None
+            if queue_state and isinstance(json_payload, dict):
+                prompt_id_obj = json_payload.get("prompt_id")
+                if isinstance(prompt_id_obj, str) and prompt_id_obj:
+                    prompt_id = prompt_id_obj
+                    response.headers.setdefault("X-Comfy-Prompt-Id", prompt_id)
+            if queue_state:
+                await queue_state.prompt_started(prompt_id)
+
+            if (
+                session_manager
+                and current_target.user_id
+                and current_target.via_duty
+                and is_prompt
+            ):
+                # Parse the prompt payload to pass to register_prompt
+                prompt_payload: Optional[Dict[str, object]] = None
+                if body:
+                    try:
+                        prompt_payload = json.loads(body)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                await session_manager.register_prompt(current_target.user_id, prompt_payload)
+
+            return response, prompt_id
+
+        async def _wait_for_prompt_turn(
+            queue_state: PromptQueueState,
+        ) -> None:
+            try:
+                await queue_state.wait_turn()
+            except Exception:
+                await queue_state.prompt_failed()
+                raise
+
+        def _prompt_in_payload(payload: object, needle: str) -> bool:
+            if isinstance(payload, str):
+                return payload == needle
+            if isinstance(payload, dict):
+                prioritized = []
+                fallback = []
+                for key, value in payload.items():
+                    key_lower = str(key).lower()
+                    if any(term in key_lower for term in ("done", "history")):
+                        continue
+                    if any(term in key_lower for term in ("pending", "running")):
+                        prioritized.append(value)
+                    else:
+                        fallback.append(value)
+                for value in prioritized:
+                    if _prompt_in_payload(value, needle):
+                        return True
+                for value in fallback:
+                    if _prompt_in_payload(value, needle):
+                        return True
+                return False
+            if isinstance(payload, list):
+                return any(_prompt_in_payload(item, needle) for item in payload)
+            return False
+
+        async def _watch_prompt_completion(
+            base_url: str,
+            prompt_id: str,
+            queue_state: PromptQueueState,
+        ) -> None:
+            check_url = f"{base_url}/queue"
+            try:
+                async with httpx.AsyncClient(timeout=10) as cli:
+                    attempts = 0
+                    while await queue_state.is_active(prompt_id):
+                        attempts += 1
+                        if attempts > 1800:  # ~60 minutes of monitoring
+                            await queue_state.prompt_finished(prompt_id)
+                            return
+                        try:
+                            resp = await cli.get(check_url)
+                        except Exception:
+                            await asyncio.sleep(2.0)
+                            continue
+                        if resp.status_code != 200:
+                            await asyncio.sleep(2.0)
+                            continue
+                        try:
+                            data = resp.json()
+                        except Exception:
+                            await asyncio.sleep(2.0)
+                            continue
+                        if not _prompt_in_payload(data, prompt_id):
+                            await queue_state.prompt_finished(prompt_id)
+                            return
+                        await asyncio.sleep(2.0)
+            except Exception:
+                await queue_state.prompt_finished(prompt_id)
+
+        if is_prompt:
+            queue_state = _get_prompt_queue(target.user_id)
+            await _wait_for_prompt_turn(queue_state)
+            try:
+                refreshed_target = await _resolve_for_request(request, body)
+                response, prompt_id = await _forward(refreshed_target, queue_state)
+                if prompt_id:
+                    asyncio.create_task(
+                        _watch_prompt_completion(refreshed_target.url, prompt_id, queue_state)
+                    )
+            except Exception:
+                await queue_state.prompt_failed()
+                raise
         else:
-            response = StreamingResponse(r.aiter_raw(), status_code=r.status_code, headers=hdrs)
-
-        response = _attach_gateway_headers(response, target)
-
-        if (
-            session_manager
-            and target.user_id
-            and target.via_duty
-            and _is_prompt_request(path, request)
-        ):
-            await session_manager.register_prompt(target.user_id)
+            response, _ = await _forward(target, None)
 
         return response
 
