@@ -15,19 +15,9 @@ trap "kill ${TELEMETRY_PID}" EXIT
 COMFY_LISTEN_ADDR=${COMFY_LISTEN_ADDR:-0.0.0.0}
 COMFY_PORT=${COMFY_PORT:-3000}
 
-EXTRA_ARGS=()
-if [[ "${COMFY_DISABLE_AUTO_LAUNCH:-1}" != "0" ]]; then
-  EXTRA_ARGS+=("--disable-auto-launch")
-fi
-if [[ "${COMFY_ENABLE_CORS:-1}" != "0" ]]; then
-  EXTRA_ARGS+=("--enable-cors-header")
-fi
-if [[ -n "${COMFY_ARGS}" ]]; then
-  # shellcheck disable=SC2206
-  EXTRA_ARGS+=(${COMFY_ARGS})
-fi
-
 exec python3 main.py \
   --listen "${COMFY_LISTEN_ADDR}" \
   --port "${COMFY_PORT}" \
-  "${EXTRA_ARGS[@]}"
+  --disable-auto-launch \
+  --enable-cors-header \
+  --highvram
