@@ -1,0 +1,3 @@
+[submodule "krita-ai-diffusion"]
+	path = krita-ai-diffusion
+	url = https://github.com/Acly/krita-ai-diffusion.git
