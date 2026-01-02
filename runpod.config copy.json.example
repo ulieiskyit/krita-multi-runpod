@@ -1,4 +1,5 @@
 {
+  "duty_pod_url": "https://your-duty-pod-url/",
   "template_id": "template_id_here",
   "api_base": "https://api.runpod.io",
   "image_name": "tarasulieiskyi/comfy-min:latest",
@@ -9,8 +10,6 @@
   "idle_timeout_s": 900,
   "failure_backoff_s": 30,
   "request_timeout_s": 30,
-  "health_path": "/queue",
-  "health_timeout_s": 10,
   "gpu_type_id": "NVIDIA GeForce RTX 5090",
   "gpu_count": 1,
   "volume_gb": 0,

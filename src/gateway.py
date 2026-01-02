@@ -338,6 +338,7 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
         base = target.url
         url = f"{base}/system_stats"
         try:
+            logger.debug("Checking system_stats from %s", url)
             async with httpx.AsyncClient(timeout=10) as cli:
                 r = await cli.get(url)
                 if r.status_code == 200:
@@ -346,7 +347,8 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
                     else:
                         response = PlainTextResponse(status_code=200, content=r.text)
                     return _attach_gateway_headers(response, target)
-        except Exception:
+        except Exception as exc:
+            logger.warning("system_stats request failed: %s", exc)
             pass
 
         queue_info = None
@@ -646,6 +648,7 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
     async def proxy_all(path: str, request: Request):
+        print(f"DEBUG: Request to /{path}")
         body = await request.body()
         target = await _resolve_for_request(request, body)
         headers = _filter_headers(request.headers)
@@ -667,6 +670,7 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
                 return response, None
 
             try:
+                logger.debug("Proxying %s %s to %s", request.method, path, upstream_url)
                 async with httpx.AsyncClient(timeout=None) as cli:
                     r = await cli.request(
                         request.method,
@@ -674,7 +678,8 @@ def create_app(config: GatewayConfig, session_manager: Optional[RunpodSessionMan
                         content=body if request.method in {"POST", "PUT", "PATCH"} else None,
                         headers=headers,
                     )
-            except Exception:
+            except Exception as exc:
+                logger.error("Proxy failed for %s: %s", upstream_url, exc)
                 if queue_state:
                     await queue_state.prompt_failed()
                 raise
